@@ -422,46 +422,202 @@ namespace JSIL {
             var metadata = methodInfo.Metadata;
             if (metadata != null) {
                 var parms = metadata.GetAttributeParameters("JSIL.Meta.JSReplacement");
-                if (parms != null) {
-                    var argsDict = new Dictionary<string, JSExpression>();
+                if (parms != null)
+                {
+	                var expressionText = (string) parms[0].Value;
 
-                    argsDict["assemblyof(executing)"] = new JSReflectionAssembly(ThisMethod.DeclaringType.Module.Assembly);
-
-                    if (thisExpression != null) {
-                        argsDict["this"] = thisExpression;
-                        argsDict["typeof(this)"] = Translate_TypeOf(thisExpression.GetActualType(TypeSystem));
-                        argsDict["etypeof(this)"] = Translate_TypeOf(thisExpression.GetActualType(TypeSystem).GetElementType());
-                    }
-
-                    var genericMethod = method as GenericInstanceMethod;
-                    if (genericMethod != null) {
-                        foreach (var kvp in methodInfo.GenericParameterNames.Zip(genericMethod.GenericArguments, (n, p) => new { Name = n, Value = p })) {
-                            argsDict.Add(kvp.Name, new JSTypeOfExpression(kvp.Value));
-                        }
-                    }
-
-                    foreach (var kvp in methodInfo.Parameters.Zip(arguments, (p, v) => new { p.Name, Value = v })) {
-                        argsDict.Add(kvp.Name, kvp.Value);
-                        argsDict["typeof(" + kvp.Name + ")"] = Translate_TypeOf(kvp.Value.GetActualType(TypeSystem));
-                        argsDict["etypeof(" + kvp.Name + ")"] = Translate_TypeOf(kvp.Value.GetActualType(TypeSystem).GetElementType());
-                    }
-
-                    var isConstantIfArgumentsAre = methodInfo.Metadata.HasAttribute("JSIL.Meta.JSIsPure");
-
-                    var result = new JSVerbatimLiteral(
-                        method, (string)parms[0].Value, argsDict, resultType, isConstantIfArgumentsAre
-                    );
-
-                    return PackedArrayUtil.FilterInvocationResult(
-                        method, methodInfo, 
-                        result,                         
-                        TypeInfo, TypeSystem
-                    );
+	                return GenerateVerbatimReplacement(method, methodInfo, thisExpression, arguments, resultType, expressionText);
                 }
+
+	            bool scriptSharpImport = methodInfo.DeclaringType.Metadata.HasAttribute("System.ImportedAttribute");
+	            if (scriptSharpImport)
+	            {
+		            var replacement = GenerateScriptSharpReplacement(methodInfo);
+
+		            if (replacement == null)
+		            {
+			            Debug.WriteLine("Not supported: {0}", methodInfo);
+			            return null;
+		            }
+
+					Debug.WriteLine("{0} -> {1}", methodInfo, replacement);
+
+					return GenerateVerbatimReplacement(method, methodInfo, thisExpression, arguments, resultType, replacement);
+	            }
             }
 
             return null;
         }
+
+	    JSExpression GenerateVerbatimReplacement(MethodReference method, Internal.MethodInfo methodInfo, JSExpression thisExpression,
+		    IEnumerable<JSExpression> arguments, TypeReference resultType, string expressionText)
+	    {
+		    var argsDict = new Dictionary<string, JSExpression>();
+
+		    argsDict["assemblyof(executing)"] = new JSReflectionAssembly(ThisMethod.DeclaringType.Module.Assembly);
+
+		    if (thisExpression != null)
+		    {
+			    argsDict["this"] = thisExpression;
+			    argsDict["typeof(this)"] = Translate_TypeOf(thisExpression.GetActualType(TypeSystem));
+			    argsDict["etypeof(this)"] = Translate_TypeOf(thisExpression.GetActualType(TypeSystem).GetElementType());
+		    }
+
+		    var genericMethod = method as GenericInstanceMethod;
+		    if (genericMethod != null)
+		    {
+			    foreach (
+				    var kvp in methodInfo.GenericParameterNames.Zip(genericMethod.GenericArguments, (n, p) => new {Name = n, Value = p}))
+			    {
+				    argsDict.Add(kvp.Name, new JSTypeOfExpression(kvp.Value));
+			    }
+		    }
+
+		    foreach (var kvp in methodInfo.Parameters.Zip(arguments, (p, v) => new {p.Name, Value = v}))
+		    {
+			    argsDict.Add(kvp.Name, kvp.Value);
+			    argsDict["typeof(" + kvp.Name + ")"] = Translate_TypeOf(kvp.Value.GetActualType(TypeSystem));
+			    argsDict["etypeof(" + kvp.Name + ")"] = Translate_TypeOf(kvp.Value.GetActualType(TypeSystem).GetElementType());
+		    }
+
+		    var isConstantIfArgumentsAre = methodInfo.Metadata.HasAttribute("JSIL.Meta.JSIsPure");
+
+		    var result = new JSVerbatimLiteral(
+			    method, expressionText, argsDict, resultType, isConstantIfArgumentsAre
+			    );
+
+		    return PackedArrayUtil.FilterInvocationResult(
+			    method, methodInfo,
+			    result,
+			    TypeInfo, TypeSystem
+			    );
+	    }
+
+	    string GenerateScriptSharpReplacement(Internal.MethodInfo methodInfo)
+	    {
+		    bool ignoreNamespace = methodInfo.DeclaringType.Metadata.HasAttribute("System.IgnoreNamespaceAttribute");
+		    if (!ignoreNamespace)
+				// TODO: support
+			    return null;
+
+			var replacement = new StringBuilder();
+		    if (!methodInfo.IsConstructor)
+		    {
+			    if (methodInfo.DeclaringProperty != null)
+				    return GenerateScriptSharpPropertyAccessor(methodInfo, replacement);				
+
+			    if (methodInfo.DeclaringEvent != null)
+				    throw new NotImplementedException();
+
+				var name = GetScriptSharpName(methodInfo);
+				var prefix = GetScriptSharpNamePrefix(methodInfo);
+
+			    replacement.Append(prefix);
+			    if (!methodInfo.IsStatic)
+				    replacement.Append("$this.");
+			    replacement.Append(name);
+
+		    } else if (!methodInfo.IsStatic)
+		    {
+				// instance constructor
+			    replacement.Append("new ");
+			    replacement.Append(methodInfo.DeclaringType.Name);
+		    }
+		    else
+		    {
+			    throw new NotSupportedException();
+		    }
+		    replacement.Append('(');
+		    AppendScriptSharpParameters(methodInfo.Parameters, replacement);
+		    replacement.Append(")");
+		    return replacement.ToString();
+	    }
+
+		string GenerateScriptSharpPropertyAccessor(Internal.MethodInfo methodInfo, StringBuilder replacement)
+		{
+			var name = GetScriptSharpName(methodInfo.DeclaringProperty);
+			var prefix = GetScriptSharpNamePrefix(methodInfo.DeclaringProperty);
+
+			if (methodInfo.DeclaringProperty.Getter != methodInfo
+				&& methodInfo.DeclaringProperty.Setter != methodInfo)
+				throw new BadImageFormatException();
+
+			replacement.Append(prefix);
+			if (!methodInfo.IsStatic)
+				replacement.Append("$this.");
+
+			bool isGetter = methodInfo.DeclaringProperty.Getter == methodInfo;
+			bool isIntrinsic = methodInfo.DeclaringProperty.Metadata.HasAttribute("System.IntrinsicPropertyAttribute");
+
+			var parameters = isGetter ? methodInfo.Parameters : methodInfo.Parameters.Take(methodInfo.Parameters.Length - 1);
+			bool isIndexed = isGetter ? methodInfo.Parameters.Length != 0 : methodInfo.Parameters.Length != 1;
+			if (isIndexed)
+			{
+				if (isIntrinsic)
+				{
+					TrimTrailing(replacement, '.');
+				}
+				else
+				{
+					replacement.Append(name);
+				}
+
+				replacement.Append('[');
+				AppendScriptSharpParameters(parameters, replacement);
+				replacement.Append(']');
+			}
+			else
+			{
+				replacement.Append(name);
+			}
+
+			if (!isGetter) {
+				replacement.Append(" = $");
+				replacement.Append(methodInfo.Parameters[methodInfo.Parameters.Length - 1].Name);
+			}
+
+			return replacement.ToString();
+		}
+
+	    static void TrimTrailing(StringBuilder builder, char trimChar)
+	    {
+		    if (builder.Length == 0)
+				return;
+		    if (builder[builder.Length - 1] == trimChar)
+			    builder.Length--;
+	    }
+
+	    static void AppendScriptSharpParameters(IEnumerable<ParameterDefinition> parameters, StringBuilder replacement)
+	    {
+			foreach (var parameter in parameters)
+			    replacement.AppendFormat("${0}, ", parameter.Name);
+		    // remove trailing ', ' if needed
+		    if (replacement[replacement.Length - 1] == ' ')
+			    replacement.Length -= 2;
+	    }
+
+		private string GetScriptSharpNamePrefix(IMemberInfo methodInfo)
+		{
+			if (!methodInfo.IsStatic)
+				return string.Empty;
+
+			var typeGeneratedName = methodInfo.DeclaringType.Metadata.GetAttributeParameters("System.GeneratedNameAttribute");
+			if (typeGeneratedName != null)
+				return typeGeneratedName[0].Value + ".";
+
+			return string.Empty;
+		}
+
+		private string GetScriptSharpName(IMemberInfo methodInfo)
+		{
+			var generatedNameAttribute = methodInfo.Metadata.GetAttributeParameters("System.GeneratedNameAttribute");
+			if (generatedNameAttribute != null)
+				return (string)generatedNameAttribute[0].Value;
+
+			var result = new StringBuilder(methodInfo.Name);
+			result[0] = Char.ToLowerInvariant(result[0]);
+			return result.ToString();
+		}
 
         protected JSExpression Translate_ConstructorReplacement (
             MethodReference constructor, Internal.MethodInfo constructorInfo, JSNewExpression newExpression
