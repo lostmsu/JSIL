@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -12,6 +13,9 @@ using JSIL.Internal;
 using JSIL.Transforms;
 using Microsoft.CSharp.RuntimeBinder;
 using Mono.Cecil;
+using Mono.CSharp;
+using TypeDefinition = Mono.Cecil.TypeDefinition;
+using TypeInfo = JSIL.Internal.TypeInfo;
 
 namespace JSIL {
     public class ILBlockTranslator {
@@ -436,11 +440,11 @@ namespace JSIL {
 
 		            if (replacement == null)
 		            {
-			            Debug.WriteLine("Not supported: {0}", methodInfo);
+			            DebugWriteOnce("Not supported: {0}", methodInfo);
 			            return null;
 		            }
 
-					Debug.WriteLine("{0} -> {1}", methodInfo, replacement);
+					DebugWriteOnce("{0} -> {1}", methodInfo, replacement);
 
 					return GenerateVerbatimReplacement(method, methodInfo, thisExpression, arguments, resultType, replacement);
 	            }
@@ -448,6 +452,17 @@ namespace JSIL {
 
             return null;
         }
+
+		#warning Delete in production
+		static readonly HashSet<string> debugDumped = new HashSet<string>();
+			
+		[Conditional("DEBUG")]
+	    static void DebugWriteOnce(string format, params object[] parameters)
+		{
+			string toWrite = string.Format(CultureInfo.InvariantCulture, format, parameters);
+			if (debugDumped.Add(toWrite))
+				Debug.WriteLine(toWrite);
+		}
 
 	    JSExpression GenerateVerbatimReplacement(MethodReference method, Internal.MethodInfo methodInfo, JSExpression thisExpression,
 		    IEnumerable<JSExpression> arguments, TypeReference resultType, string expressionText)
